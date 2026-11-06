@@ -13,8 +13,8 @@ python3 pillbug_gui.py
 
 1. Pick the **video** (and, ideally, a short image/video of the **empty arena**).
 2. Check the preview: chamber numbers, the centre cup, the outer wall and the yellow A/B boundary.
-   Adjust centre / radii / number of chambers until the overlay fits. "equal area" sets
-   `r_AB = sqrt((R^2 + a^2) / 2)`.
+   Adjust centre / radii / number of chambers until the overlay fits. The A/B boundary is the **inner edge of the black roof**
+   (= arena radius; the button resets it). Everything you can see is A; B is under the roof.
 3. **Run analysis**. Outputs go to the output folder:
 
 | file | content |
@@ -31,7 +31,7 @@ The roof over B hides the bug from the overhead camera, and the dividers cast sh
 can disappear in two very different ways:
 
 * last seen **deep inside A** (e.g. in a divider's shadow) -> still **A** (`A_hidden`), not shelter
-* last seen **at the A/B boundary (within the entry zone) or in B** -> **B** (`B_hidden`)
+* last seen **near the roof edge (within the entry zone, default 45 px) or in B** -> **B** (`B_hidden`)
 * before the bug is first seen (it starts under the cup in B) -> `B_hidden`
 * dropouts shorter than "min hidden time" keep the previous side
 
@@ -43,6 +43,6 @@ Unit tests for the rule: `python3 -m unittest test_states`.
 * Without empty-arena footage the background is the median of the whole video, which can absorb a bug
   that never moves. Record 10-20 s of the empty arena (or leave the first N s empty and set
   "First N s are empty").
-* Distance is converted to cm with the arena diameter (default 20 cm).
-* Parameters (threshold, entry zone, ...) were tuned on pilot videos without a roof: check
-  `annotated.mp4` on a real roofed run before trusting the numbers.
+* Distance is converted to cm using the centre-cup diameter (default 5 cm).
+* The entry zone was set from one 30-min pilot (disappearances start either at the cup wall or at the roof
+  edge, never in between). Re-check `annotated.mp4` on new runs, especially bugs that vanish mid-arena.

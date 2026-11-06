@@ -17,7 +17,7 @@ GEOM = [  # (attr, label, from, to, increment)
     ("cy", "Centre y (px)", 0, 3000, 1),
     ("r_in", "Centre-cup radius (px)", 5, 1500, 1),
     ("r_out", "Arena inner radius (px)", 5, 1500, 1),
-    ("r_ab", "A/B boundary radius (px)", 5, 1500, 1),
+    ("r_ab", "A/B boundary = roof edge (px)", 5, 1500, 1),
 ]
 
 
@@ -79,7 +79,7 @@ class App(tk.Tk):
             ttk.Spinbox(f, from_=lo, to=hi, increment=inc, textvariable=v, width=8,
                         command=self._redraw).pack(side="left")
             if attr == "r_ab":
-                ttk.Button(f, text="equal area", command=self._equal_area).pack(side="left", padx=4)
+                ttk.Button(f, text="= arena radius", command=self._equal_area).pack(side="left", padx=4)
         f = ttk.Frame(geo)
         f.pack(fill="x", pady=1)
         ttk.Label(f, text="Rotate chamber numbers", width=22).pack(side="left")
@@ -88,9 +88,9 @@ class App(tk.Tk):
                     command=self._redraw).pack(side="left")
         f = ttk.Frame(geo)
         f.pack(fill="x", pady=1)
-        ttk.Label(f, text="Arena diameter (cm)", width=22).pack(side="left")
-        self.vars["arena_diam_cm"] = tk.DoubleVar(value=self.p.arena_diam_cm)
-        ttk.Spinbox(f, from_=1, to=200, textvariable=self.vars["arena_diam_cm"], width=8).pack(side="left")
+        ttk.Label(f, text="Centre cup diameter (cm)", width=22).pack(side="left")
+        self.vars["cup_diam_cm"] = tk.DoubleVar(value=self.p.cup_diam_cm)
+        ttk.Spinbox(f, from_=1, to=200, textvariable=self.vars["cup_diam_cm"], width=8).pack(side="left")
         for w in geo.winfo_children():
             for c in w.winfo_children():
                 if isinstance(c, ttk.Spinbox):
@@ -174,7 +174,7 @@ class App(tk.Tk):
         for attr in ("cx", "cy", "r_in", "r_out", "r_ab"):
             setattr(p, attr, float(g(attr)))
         p.number_shift = int(g("number_shift"))
-        p.arena_diam_cm = float(g("arena_diam_cm"))
+        p.cup_diam_cm = float(g("cup_diam_cm"))
         p.step = max(1, int(g("step")))
         p.thresh = int(g("thresh"))
         p.min_area = int(g("min_area"))

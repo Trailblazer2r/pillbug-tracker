@@ -3,8 +3,8 @@
 Design (see pillbug_experiment_summary.md):
   * circular arena split into N radial sectors ("chambers"), one focal bug each
   * centre cup (not scored), region A = lit open area next to the cup,
-    region B = roofed shelter on the outside. Equal-area boundary
-    r_AB = sqrt((R^2 + a^2) / 2) unless given.
+    region B = roofed shelter on the outside. From above only A is visible; the
+    black roof's inner edge is the A/B boundary (equal-area design: r_AB=sqrt((R^2+a^2)/2)).
   * the bug seen in a chamber is ALWAYS that chamber's bug (identity = chamber)
 
 The roofed shelter hides the bug from the overhead camera, so "not visible" has
@@ -31,15 +31,16 @@ class Params:
     cy: float = 369.0
     r_in: float = 84.0          # edge of the centre cup (px)
     r_out: float = 240.0        # inner wall of the arena (px)
-    r_ab: float = None          # A/B boundary (px); None -> equal-area
+    r_ab: float = None          # A/B boundary (px); None -> inner edge of the roof (= r_out)
     number_shift: int = 0       # rotate chamber numbering
     step: int = 3               # analyse every Nth frame
     thresh: int = 18            # background-difference threshold (gray levels)
     min_area: int = 120
     max_area: int = 2500
-    entry_zone_px: float = 12.0   # last seen this close to r_AB (or beyond) -> counts as entering B
+    entry_zone_px: float = 45.0   # last seen this close to the roof edge (or beyond) -> entered B. Pilot: long
+                                  # disappearances start at r<120 (stationary at the cup) or r>195 (roof), none between
     min_hidden_s: float = 1.0     # shorter dropouts keep the previous state
-    arena_diam_cm: float = 20.0
+    cup_diam_cm: float = 5.0      # centre cup diameter, sets the px -> cm scale
     start_s: float = 0.0
     max_minutes: float = None
     empty_bg: str = ""            # optional image/video of the EMPTY arena
@@ -47,12 +48,12 @@ class Params:
     save_video: bool = True
 
     def boundary(self):
-        if self.r_ab:
-            return float(self.r_ab)
-        return math.sqrt((self.r_out ** 2 + self.r_in ** 2) / 2.0)
+        # The black roof covers region B. Everything visible from above is A, so the
+        # A/B boundary is the inner edge of the roof unless set explicitly.
+        return float(self.r_ab) if self.r_ab else float(self.r_out)
 
     def px_per_cm(self):
-        return 2.0 * self.r_out / self.arena_diam_cm
+        return 2.0 * self.r_in / self.cup_diam_cm
 
 
 # ----------------------------------------------------------------- geometry
