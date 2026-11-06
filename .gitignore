@@ -1,0 +1,6 @@
+__pycache__/
+*_tracking/
+*.mp4
+*.mov
+*.avi
+.DS_Store
