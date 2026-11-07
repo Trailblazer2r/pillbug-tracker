@@ -418,7 +418,14 @@ def run_analysis(video, p, out_dir, progress=None, cancel=None, log=print):
             frame_rows.append((chamber_label(k, p), f"{t:.2f}", "" if o is None else f"{o[0]:.1f}",
                                "" if o is None else f"{o[1]:.1f}", state))
     rows.sort(key=lambda r: r["chamber"])
+    main_cols = ["chamber", "time_A_s", "time_B_s", "prop_A", "latency_A_s", "n_crossings", "distance_cm"]
     with open(os.path.join(out_dir, "summary_per_chamber.csv"), "w", newline="") as fh:
+        wr = csv.writer(fh)
+        wr.writerow(main_cols)
+        for r in rows:
+            # latency is only meaningful if the bug ever entered A; otherwise NA
+            wr.writerow([("NA" if (c == "latency_A_s" and r["censored"]) else r[c]) for c in main_cols])
+    with open(os.path.join(out_dir, "summary_details.csv"), "w", newline="") as fh:   # QC only
         wr = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         wr.writeheader()
         wr.writerows(rows)

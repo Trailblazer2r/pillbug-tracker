@@ -21,7 +21,8 @@ python3 pillbug_gui.py
 
 | file | content |
 |---|---|
-| `summary_per_chamber.csv` | one row per bug: `time_A_s, time_B_s, prop_A, latency_A_s, censored, n_crossings, distance_cm` + QC columns |
+| `summary_per_chamber.csv` | one row per bug: `time_A_s, time_B_s, prop_A` (main result), `latency_A_s` (time until first in A; NA if never), `n_crossings` (A<->B switches), `distance_cm` |
+| `summary_details.csv` | QC only: visible/hidden split of the times, % frames detected, censored flag |
 | `frames_states.csv` | state of every chamber at every analysed frame |
 | `calibration.png`, `trajectories.png` | geometry check and trajectories |
 | `annotated.mp4` | check video: circle colour = state (green A, orange A hidden, blue B, purple B hidden) |
