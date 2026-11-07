@@ -26,7 +26,7 @@ IN_A = (STATE_A, STATE_A_HID)
 
 @dataclass
 class Params:
-    n_sectors: int = 6
+    n_sectors: int = 8
     cx: float = 666.0
     cy: float = 369.0
     r_in: float = 84.0          # edge of the centre cup (px)
@@ -57,6 +57,47 @@ class Params:
 
 
 # ----------------------------------------------------------------- geometry
+def auto_geometry(bg):
+    """Best-effort detection of the centre cup and the roof's inner edge.
+    Returns dict(cx, cy, r_in, r_out) or None. The GUI lets the user drag to fine-tune."""
+    h, w = bg.shape
+    g = cv2.medianBlur(bg, 5)
+    s = h / 720.0
+
+    def hough(r0, r1):
+        cs = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1, minDist=20, param1=80, param2=40,
+                              minRadius=int(r0 * s), maxRadius=int(r1 * s))
+        return [] if cs is None else cs[0][:6].tolist()
+
+    roofs, cups = hough(200, 280), hough(60, 110)
+    if not roofs or not cups:
+        return None
+    best = min(((math.hypot(r[0] - c[0], r[1] - c[1]), r, c) for r in roofs for c in cups), key=lambda t: t[0])
+    if best[0] > 40 * s:
+        return None
+    _, r, c = best
+    return dict(cx=(r[0] + c[0]) / 2, cy=(r[1] + c[1]) / 2, r_in=float(c[2]), r_out=float(r[2]))
+
+
+def guess_n_sectors(bg, p, candidates=(12, 10, 8, 6, 5, 4), min_tooth=0.35):
+    """Largest divider count for which EVERY tooth of the comb sits on a dark divider
+    (fewer teeth would trivially match a subset of the real dividers)."""
+    r, ang = _polar(bg.shape, p.cx, p.cy)
+    ring = (r > p.r_in + 10) & (r < p.boundary() - 10)
+    dark = ring & (bg < np.median(bg[ring]) - 25)
+    if dark.sum() < 200:
+        return p.n_sectors
+    hist, _ = np.histogram(ang[dark], bins=360, range=(0, 360))
+    hist = np.convolve(np.r_[hist[-3:], hist, hist[:3]], np.ones(5) / 5, "same")[3:-3].astype(float)
+    for n in candidates:
+        step = 360.0 / n
+        weakest = max(min(hist[int(round(phi + k * step)) % 360] for k in range(n))
+                      for phi in range(int(math.ceil(step))))
+        if weakest >= min_tooth * hist.max():
+            return n
+    return p.n_sectors
+
+
 def _polar(shape, cx, cy):
     h, w = shape
     yy, xx = np.mgrid[:h, :w]
@@ -111,6 +152,9 @@ def draw_overlay(img, p, spokes, sec=None, labels=True):
     if sec is not None:
         tint = np.zeros_like(out)
         tint[sec >= 0] = (0, 140, 0)
+        # B = shelter under the roof (only drawn for orientation; it is NOT tracked)
+        rr, _ = _polar(out.shape[:2], p.cx, p.cy)
+        tint[(rr >= p.boundary()) & (rr < p.boundary() * 1.37)] = (160, 60, 0)
         out = cv2.addWeighted(out, 1, tint, 0.28, 0)
     c = (int(round(p.cx)), int(round(p.cy)))
     cv2.circle(out, c, int(p.r_in), (0, 0, 255), 1)

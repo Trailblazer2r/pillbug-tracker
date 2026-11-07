@@ -11,10 +11,12 @@ pip3 install -r requirements.txt
 python3 pillbug_gui.py
 ```
 
-1. Pick the **video** (and, ideally, a short image/video of the **empty arena**).
-2. Check the preview: chamber numbers, the centre cup, the outer wall and the yellow A/B boundary.
-   Adjust centre / radii / number of chambers until the overlay fits. The A/B boundary is the **inner edge of the black roof**
-   (= arena radius; the button resets it). Everything you can see is A; B is under the roof.
+1. Choose the **video**. The cup circle, the roof's inner-edge circle and the number of chambers are
+   detected automatically. Optionally also choose a short image/video of the **empty arena**.
+2. Check the preview and, if needed, **drag** the circles: the edge of the inner red circle (cup),
+   the edge of the outer red/yellow circle (roof inner edge), or anywhere else to move both.
+   The blue band is B (under the black roof): it is **not tracked**, a bug that goes there simply disappears.
+   Everything else (chamber count, thresholds, ...) is under "Advanced settings" and normally needs no change.
 3. **Run analysis**. Outputs go to the output folder:
 
 | file | content |
