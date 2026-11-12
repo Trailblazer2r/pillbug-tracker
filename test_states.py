@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from pillbug_core import (Params, classify, summarise, detect, sector_cut, ChamberTracker,
+                          build_sector_map, assign_candidates,
                           STATE_A, STATE_A_HID, STATE_B, STATE_B_HID, IN_A)
 
 P = Params(n_sectors=6, cx=0, cy=0, r_in=50, r_out=200, r_ab=130, entry_zone_px=12,
@@ -39,6 +40,14 @@ class StateLogic(unittest.TestCase):
         self.assertEqual(s[30], STATE_B_HID)
         self.assertEqual(s[-1], STATE_A)
         self.assertEqual(s[42], STATE_A)       # the return is dated back to its first frame
+
+    def test_long_absence_deep_in_A_eventually_means_B(self):
+        p = Params(n_sectors=6, cx=0, cy=0, r_in=50, r_out=200, r_ab=130, entry_zone_px=12, max_shadow_s=60)
+        s = classify([at(80)] * 5 + [None] * 1500, DT, p)       # 150 s out of sight
+        self.assertEqual(s[300], STATE_A_HID)                    # 30 s: still shadow
+        self.assertEqual(s[550], STATE_A_HID)                    # just under 60 s
+        self.assertEqual(s[900], STATE_B_HID)
+        self.assertEqual(s[-1], STATE_B_HID)
 
     def test_visible_in_B(self):
         self.assertEqual(classify([at(160)], DT, P), [STATE_B])
@@ -115,6 +124,48 @@ class Tracker(unittest.TestCase):
         self.assertTrue(all(o is None for o in out[:-1]))
         self.assertEqual(out[-1], (100.0, 100.0))
         self.assertEqual(len(self.t.backfill), self.t.confirm_n - 1)
+
+
+class DividerBorder(unittest.TestCase):
+    def setUp(self):
+        self.p = Params(n_sectors=4, cx=200, cy=200, r_in=30, r_out=190, cup_diam_cm=5)
+        self.spokes = [0.0, 90.0, 180.0, 270.0]          # sector k spans spokes[k] .. spokes[k+1]
+        self.sec = build_sector_map((400, 400), self.p, self.spokes)
+        self.trk = [ChamberTracker(DT, self.p) for _ in range(4)]
+
+    def at_angle(self, deg, r=100.0):
+        a = np.radians(deg)
+        return (200 + r * np.cos(a), 200 + r * np.sin(a), 500, 80.0)
+
+    def test_plain_blob_goes_to_its_sector(self):
+        by = assign_candidates([self.at_angle(45)], self.sec, self.trk, self.p, self.spokes)
+        self.assertEqual([len(b) for b in by], [1, 0, 0, 0])
+
+    def test_blob_on_divider_goes_to_the_chamber_that_follows_it(self):
+        self.trk[3].last = self.at_angle(357)[:2]          # chamber 4's bug is just across the divider
+        by = assign_candidates([self.at_angle(3)], self.sec, self.trk, self.p, self.spokes)
+        self.assertEqual([len(b) for b in by], [0, 0, 0, 1])
+
+    def test_blob_on_divider_without_a_follower_stays_by_position(self):
+        by = assign_candidates([self.at_angle(3)], self.sec, self.trk, self.p, self.spokes)
+        self.assertEqual([len(b) for b in by], [1, 0, 0, 0])
+
+    def test_nearer_follower_wins(self):
+        self.trk[0].last = self.at_angle(4, 100)[:2]       # own chamber's bug is even closer
+        self.trk[3].last = self.at_angle(357, 100)[:2]
+        by = assign_candidates([self.at_angle(3)], self.sec, self.trk, self.p, self.spokes)
+        self.assertEqual([len(b) for b in by], [1, 0, 0, 0])
+
+    def test_a_tracker_that_lost_its_bug_cannot_claim(self):
+        self.trk[3].last = self.at_angle(357)[:2]
+        self.trk[3].gap = 40                                   # 4 s without seeing it
+        by = assign_candidates([self.at_angle(3)], self.sec, self.trk, self.p, self.spokes)
+        self.assertEqual([len(b) for b in by], [1, 0, 0, 0])
+
+    def test_far_from_divider_is_never_moved(self):
+        self.trk[3].last = self.at_angle(300)[:2]
+        by = assign_candidates([self.at_angle(30)], self.sec, self.trk, self.p, self.spokes)
+        self.assertEqual([len(b) for b in by], [1, 0, 0, 0])
 
 
 class Detection(unittest.TestCase):

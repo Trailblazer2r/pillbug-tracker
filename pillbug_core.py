@@ -42,9 +42,12 @@ class Params:
     min_hidden_s: float = 1.0     # shorter dropouts keep the previous state
     min_dwell_s: float = 2.0      # an A<->B switch is only accepted after the new side has held this long
                                   # (the switch is dated back to when it started)
+    max_shadow_s: float = 120.0   # not seen while last seen deep in A: still A for this long (divider shadow), then B
+                                  # (the dark bands along the dividers lead to the roof, so a long absence means it left)
     hyst_px: float = 12.0         # visible within this distance of the A/B boundary counts as "no change"
     min_contrast: int = 30        # a blob must have a core at least this far from the background
     bug_area: float = None        # area of ONE bug in px (None -> measured from the video); bigger blobs are split
+    border_px: float = 35.0       # a blob this close to a divider goes to the chamber that was following it
     confirm_s: float = 1.0        # a detection that jumps far from the last position is trusted only after this long
     max_speed_cm_s: float = 3.0   # fastest plausible bug speed, sets how far a bug may move between frames
     cup_diam_cm: float = 5.0      # centre cup diameter, sets the px -> cm scale
@@ -240,7 +243,8 @@ def detect(gray, bg, roi, p, cut=None):
 
     * exposure drift is removed with a gain (not an offset), so dark places (dividers, roof
       shadow) do not light up when the camera brightness changes
-    * `cut` (sector borders) separates bugs of neighbouring chambers that touch each other
+    * `cut` (optional sector borders) separates touching bugs of neighbouring chambers; the analysis
+      does not use it, because it also cuts one bug lying on a divider into two halves
     * blobs without a strong core, or long thin ones (shadow edges), are not bugs
     * a blob much larger than one bug (`p.bug_area`) is several bugs: it is split with k-means
     """
@@ -269,7 +273,7 @@ def detect(gray, bg, roi, p, cut=None):
         if strength < p.min_contrast:
             continue
         pts = np.column_stack([xs, ys]).astype(np.float32)
-        if bug and area > 1.7 * bug:
+        if bug and area > 1.55 * bug:
             k = int(min(4, max(2, round(area / bug))))
             crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
             _, lbl, ctr = cv2.kmeans(pts, k, None, crit, 3, cv2.KMEANS_PP_CENTERS)
@@ -317,6 +321,13 @@ class ChamberTracker:
         self.pending, self.hist = None, []
         self.backfill = []      # after a confirmation: positions of the unconfirmed frames just before this one
 
+    def claim_dist(self, c):
+        """Distance to where this chamber's bug was, if c could plausibly be it (else None)."""
+        if self.last is None or self.gap * self.dt > 1.0:     # only a bug that is being followed right now
+            return None
+        d = math.hypot(c[0] - self.last[0], c[1] - self.last[1])
+        return d if d <= 25.0 + 0.5 * self.v_px * self.gap * self.dt else None
+
     def _accept(self, c):
         self.last, self.gap = (c[0], c[1]), 0
         self.backfill = self.hist[:-1] if self.hist else []
@@ -345,6 +356,40 @@ class ChamberTracker:
         return None
 
 
+def border_info(x, y, p, spokes, k):
+    """Chamber on the other side of the divider nearest to (x, y), and the distance (px) to that divider."""
+    n = len(spokes)
+    r = math.hypot(x - p.cx, y - p.cy)
+    a = math.degrees(math.atan2(y - p.cy, x - p.cx)) % 360
+    best = None
+    for j, s in enumerate(spokes):
+        d = ((a - s + 180) % 360) - 180          # signed offset from divider j (deg)
+        dist = abs(math.sin(math.radians(d))) * r if abs(d) <= 90 else r   # a divider is a ray from the centre
+        if best is None or dist < best[0]:
+            best = (dist, j, d)
+    dist, j, d = best
+    here, other = (j, (j - 1) % n) if d >= 0 else ((j - 1) % n, j)
+    return (other, dist) if here == k else (None, None)
+
+
+def assign_candidates(dets, sec, trackers, p, spokes):
+    """Blobs -> chambers. By position, except that a blob close to a divider goes to the chamber that
+    was following a bug nearby (a bug walking along a divider must not change chamber every frame)."""
+    h, w = sec.shape
+    by_sec = [[] for _ in trackers]
+    for d in dets:
+        k = int(sec[min(max(int(d[1]), 0), h - 1), min(max(int(d[0]), 0), w - 1)])
+        if k < 0:
+            continue
+        other, dist = border_info(d[0], d[1], p, spokes, k)
+        if other is not None and dist <= p.border_px:
+            mine, theirs = trackers[k].claim_dist(d), trackers[other].claim_dist(d)
+            if theirs is not None and (mine is None or theirs < mine):
+                k = other
+        by_sec[k].append(d)
+    return by_sec
+
+
 # ------------------------------------------------------------ state logic
 def _label(side, visible):
     if side == "A":
@@ -357,7 +402,8 @@ class StateMachine:
 
     * evidence per frame: visible well inside A -> A, visible well outside -> B, visible within
       `hyst_px` of the boundary -> no evidence. Not visible (after `min_hidden_s`): last seen near
-      the roof edge or in B -> B, last seen deeper in A (divider shadow) -> A.
+      the roof edge or in B -> B, last seen deeper in A (divider shadow) -> A, but only for
+      `max_shadow_s` (the shadow bands lead to the roof: a long absence means the bug left).
     * the side only changes after the opposite evidence has lasted `min_dwell_s`; the switch is
       then dated back to when that evidence began (so latencies are not delayed).
     * before the bug is first seen it is in the shelter (B hidden).
@@ -368,6 +414,7 @@ class StateMachine:
         self.r_ab = p.boundary()
         self.min_f = max(1, int(round(p.min_hidden_s / dt)))
         self.dwell_f = max(1, int(round(p.min_dwell_s / dt)))
+        self.max_shadow_f = max(self.min_f + 1, int(round(p.max_shadow_s / dt)))
         self.side = None
         self.sides, self.vis = [], []
         self.last_r, self.run = None, 0
@@ -385,7 +432,7 @@ class StateMachine:
             return None
         if self.side == "B" or self.last_r is None or self.last_r >= self.r_ab - p.entry_zone_px:
             return "B"
-        return "A"
+        return "A" if self.run < self.max_shadow_f else "B"
 
     def update(self, o):
         i = len(self.sides)
@@ -492,11 +539,10 @@ def run_analysis(video, p, out_dir, progress=None, cancel=None, log=print):
     spokes = find_spoke_angles(bg, p)
     sec = build_sector_map(bg.shape, p, spokes)
     roi = sec >= 0
-    cut = sector_cut(sec)
     log("divider angles: " + ", ".join(f"{a:.0f}" for a in spokes))
     if not p.bug_area:
         p.bug_area = None
-        est = estimate_bug_area(cap, f_start, f_end, bg, roi, cut, p)
+        est = estimate_bug_area(cap, f_start, f_end, bg, roi, None, p)
         p.bug_area = est
         log(f"one bug = {est:.0f} px (blobs much bigger than this are split)" if est else
             "could not measure the size of one bug; merged bugs will not be split")
@@ -529,12 +575,8 @@ def run_analysis(video, p, out_dir, progress=None, cancel=None, log=print):
             if not ok:
                 break
             gray = _gray(frame)
-            dets = detect(gray, bg, roi, p, cut)
-            by_sec = [[] for _ in range(n)]
-            for d in dets:
-                k = int(sec[min(max(int(d[1]), 0), h - 1), min(max(int(d[0]), 0), w - 1)])
-                if k >= 0:
-                    by_sec[k].append(d)
+            dets = detect(gray, bg, roi, p)
+            by_sec = assign_candidates(dets, sec, trackers, p, spokes)
             for k in range(n):
                 obs[k].append(trackers[k].update(by_sec[k]))
                 for j, pos in enumerate(reversed(trackers[k].backfill), start=2):

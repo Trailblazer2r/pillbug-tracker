@@ -33,7 +33,8 @@ Identity = chamber (the bug seen in chamber *k* is chamber *k*'s bug).
 The roof over B hides the bug from the overhead camera, and the dividers cast shadows, so a bug
 can disappear in two very different ways:
 
-* last seen **deep inside A** (e.g. in a divider's shadow) -> still **A** (`A_hidden`), not shelter
+* last seen **deep inside A** (e.g. in a divider's shadow) -> still **A** (`A_hidden`), not shelter, but only for
+  `max_shadow_s` (default 120 s): the dark bands along the dividers lead to the roof, so a longer absence means the bug left (-> `B_hidden`)
 * last seen **near the roof edge (within the entry zone, default 45 px) or in B** -> **B** (`B_hidden`)
 * before the bug is first seen (it starts under the cup in B) -> `B_hidden`
 * dropouts shorter than "min hidden time" keep the previous side
@@ -46,8 +47,10 @@ boundary counts as "no change".
 
 * the background difference uses a gain (not an offset), so dark places (dividers, roof shadow) do not light up when the camera brightness drifts
 * blobs without a strong core (`min_contrast`) and long thin ones (shadow edges) are ignored
-* bugs of neighbouring chambers that touch are separated along the divider lines; a blob much larger than one bug
-  (`bug_area`, measured from the video) is split into several bugs and the one closest to the previous position is followed
+* a blob much larger than one bug (`bug_area`, measured from the video) is split into several bugs and the one closest
+  to the previous position is followed
+* a blob within `border_px` (35 px) of a divider goes to the chamber that is following a bug right there, so a bug walking
+  along a divider does not change chamber every frame (and is not cut in half by the divider line)
 * a detection that jumps farther than a bug can walk is only believed after it stays put for 1 s (`confirm_s`)
 * `annotated.mp4`: grey dots are blobs that were seen but NOT chosen as the bug
 
