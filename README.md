@@ -38,6 +38,19 @@ can disappear in two very different ways:
 * before the bug is first seen (it starts under the cup in B) -> `B_hidden`
 * dropouts shorter than "min hidden time" keep the previous side
 
+A bug does not switch sides every second, so a switch between A and B is only accepted after the new side has held for
+**2 s** (`min_dwell_s`; the switch is dated back to when it started), and a bug seen within 12 px (`hyst_px`) of the
+boundary counts as "no change".
+
+## How the bug is found
+
+* the background difference uses a gain (not an offset), so dark places (dividers, roof shadow) do not light up when the camera brightness drifts
+* blobs without a strong core (`min_contrast`) and long thin ones (shadow edges) are ignored
+* bugs of neighbouring chambers that touch are separated along the divider lines; a blob much larger than one bug
+  (`bug_area`, measured from the video) is split into several bugs and the one closest to the previous position is followed
+* a detection that jumps farther than a bug can walk is only believed after it stays put for 1 s (`confirm_s`)
+* `annotated.mp4`: grey dots are blobs that were seen but NOT chosen as the bug
+
 `time_A_hidden_s` etc. are reported so you can see how much of the data relies on this rule.
 Unit tests for the rule: `python3 -m unittest test_states`.
 

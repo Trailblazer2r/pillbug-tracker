@@ -12,7 +12,7 @@ to be interpreted. A bug that vanishes deep inside A (e.g. in the shadow of a
 radial divider) is still counted as being in A; only a bug that was last seen
 at/near the A/B boundary (or inside B) and then vanishes counts as in B.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import csv
 import math
 import os
@@ -40,6 +40,13 @@ class Params:
     entry_zone_px: float = 45.0   # last seen this close to the roof edge (or beyond) -> entered B. Pilot: long
                                   # disappearances start at r<120 (stationary at the cup) or r>195 (roof), none between
     min_hidden_s: float = 1.0     # shorter dropouts keep the previous state
+    min_dwell_s: float = 2.0      # an A<->B switch is only accepted after the new side has held this long
+                                  # (the switch is dated back to when it started)
+    hyst_px: float = 12.0         # visible within this distance of the A/B boundary counts as "no change"
+    min_contrast: int = 30        # a blob must have a core at least this far from the background
+    bug_area: float = None        # area of ONE bug in px (None -> measured from the video); bigger blobs are split
+    confirm_s: float = 1.0        # a detection that jumps far from the last position is trusted only after this long
+    max_speed_cm_s: float = 3.0   # fastest plausible bug speed, sets how far a bug may move between frames
     cup_diam_cm: float = 5.0      # centre cup diameter, sets the px -> cm scale
     start_s: float = 0.0
     max_minutes: float = None
@@ -220,57 +227,205 @@ def quick_background(video, n=15):
 
 
 # ---------------------------------------------------------------- detection
-def detect(gray, bg, roi, p):
-    g = cv2.GaussianBlur(gray, (5, 5), 0).astype(np.int16)
-    b = cv2.GaussianBlur(bg, (5, 5), 0).astype(np.int16)
-    diff = g - b
-    diff -= int(np.median(diff[roi]))   # cancel global exposure drift
-    m = ((np.abs(diff) > p.thresh) & roi).astype(np.uint8)
+def sector_cut(sec):
+    """1-px lines along the sector borders, so that one blob can never span two chambers."""
+    e = np.zeros(sec.shape, bool)
+    e[:, 1:] |= sec[:, 1:] != sec[:, :-1]
+    e[1:, :] |= sec[1:, :] != sec[:-1, :]
+    return cv2.dilate(e.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+
+
+def detect(gray, bg, roi, p, cut=None):
+    """Blobs that differ from the background -> list of (x, y, area, strength).
+
+    * exposure drift is removed with a gain (not an offset), so dark places (dividers, roof
+      shadow) do not light up when the camera brightness changes
+    * `cut` (sector borders) separates bugs of neighbouring chambers that touch each other
+    * blobs without a strong core, or long thin ones (shadow edges), are not bugs
+    * a blob much larger than one bug (`p.bug_area`) is several bugs: it is split with k-means
+    """
+    g = cv2.GaussianBlur(gray, (5, 5), 0).astype(np.float32)
+    b = cv2.GaussianBlur(bg, (5, 5), 0).astype(np.float32)
+    gain = float(np.median(g[roi])) / max(1.0, float(np.median(b[roi])))
+    diff = g - gain * b
+    diff -= float(np.median(diff[roi]))
+    ad = np.abs(diff)
+    m = ((ad > p.thresh) & roi).astype(np.uint8)
     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
-    n, _, stats, cents = cv2.connectedComponentsWithStats(m)
-    return [(float(cents[i][0]), float(cents[i][1]), int(stats[i, cv2.CC_STAT_AREA]))
-            for i in range(1, n) if p.min_area <= stats[i, cv2.CC_STAT_AREA] <= p.max_area]
+    if cut is not None:
+        m[cut] = 0
+    n, lab, stats, cents = cv2.connectedComponentsWithStats(m)
+    bug = p.bug_area
+    out = []
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < p.min_area or area > 3 * p.max_area:
+            continue
+        x0, y0, w0, h0 = (int(v) for v in stats[i, :4])
+        ys, xs = np.nonzero(lab[y0:y0 + h0, x0:x0 + w0] == i)
+        ys, xs = ys + y0, xs + x0
+        strength = float(np.percentile(ad[ys, xs], 90))
+        if strength < p.min_contrast:
+            continue
+        pts = np.column_stack([xs, ys]).astype(np.float32)
+        if bug and area > 1.7 * bug:
+            k = int(min(4, max(2, round(area / bug))))
+            crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+            _, lbl, ctr = cv2.kmeans(pts, k, None, crit, 3, cv2.KMEANS_PP_CENTERS)
+            lbl = lbl.ravel()
+            for j in range(k):
+                cnt = int((lbl == j).sum())
+                if cnt >= 0.5 * p.min_area:
+                    out.append((float(ctr[j][0]), float(ctr[j][1]), cnt, strength))
+            continue
+        if area > p.max_area:
+            continue
+        (_, _), (rw, rh), _ = cv2.minAreaRect(pts)
+        if min(rw, rh) > 0 and max(rw, rh) / min(rw, rh) > 4.5:
+            continue
+        out.append((float(cents[i][0]), float(cents[i][1]), area, strength))
+    return out
 
 
-def pick_for_chamber(cands, last):
-    """One bug per chamber: keep the candidate closest to where the bug was, else the biggest."""
-    if not cands:
+def estimate_bug_area(cap, f0, f1, bg, roi, cut, p, n=60):
+    """Typical blob area = one bug. Measured without splitting, so it must be called with bug_area=None."""
+    areas = []
+    for i in dict.fromkeys(np.linspace(f0, max(f0, f1 - 1), n).astype(int).tolist()):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ok, f = cap.read()
+        if ok:
+            areas += [d[2] for d in detect(_gray(f), bg, roi, p, cut)]
+    return float(np.median(areas)) if len(areas) >= 10 else None
+
+
+class ChamberTracker:
+    """Chooses the focal bug among one chamber's candidates, with continuity.
+
+    A bug cannot jump: a candidate farther from the last position than the bug could have
+    walked is only believed after it has stayed put for `confirm_s` (this removes flashes,
+    reflections and the like, and stops the track from hopping onto an artefact).
+    """
+
+    def __init__(self, dt, p):
+        self.dt = dt
+        self.v_px = p.max_speed_cm_s * p.px_per_cm()
+        self.confirm_n = max(1, int(round(p.confirm_s / dt)))
+        self.same_px = 0.5 * p.px_per_cm()
+        self.max_jump = 2.0 * p.r_out
+        self.last, self.gap = None, 0
+        self.pending, self.hist = None, []
+        self.backfill = []      # after a confirmation: positions of the unconfirmed frames just before this one
+
+    def _accept(self, c):
+        self.last, self.gap = (c[0], c[1]), 0
+        self.backfill = self.hist[:-1] if self.hist else []
+        self.pending, self.hist = None, []
+        return (c[0], c[1])
+
+    def update(self, cands):
+        self.backfill = []
+        if not cands:
+            self.gap += 1
+            self.pending, self.hist = None, []
+            return None
+        if self.last is not None:
+            allowed = min(self.max_jump, 25.0 + self.v_px * (self.gap + 1) * self.dt)
+            near = [c for c in cands if math.hypot(c[0] - self.last[0], c[1] - self.last[1]) <= allowed]
+            if near:
+                return self._accept(min(near, key=lambda c: math.hypot(c[0] - self.last[0], c[1] - self.last[1])))
+        c = max(cands, key=lambda c: c[2] * c[3])
+        if self.pending is None or math.hypot(c[0] - self.pending[0], c[1] - self.pending[1]) > self.same_px:
+            self.hist = []
+        self.pending = (c[0], c[1])
+        self.hist.append(self.pending)
+        if len(self.hist) >= self.confirm_n:
+            return self._accept(c)
+        self.gap += 1
         return None
-    if last is not None:
-        return min(cands, key=lambda c: math.hypot(c[0] - last[0], c[1] - last[1]))
-    return max(cands, key=lambda c: c[2])
 
 
 # ------------------------------------------------------------ state logic
-def classify(obs, dt, p):
-    """obs: per processed frame, (x, y) or None for ONE chamber -> list of states.
+def _label(side, visible):
+    if side == "A":
+        return STATE_A if visible else STATE_A_HID
+    return STATE_B if visible else STATE_B_HID
 
-    Visible: A or B by radius. Not visible (shelter roof OR divider shadow):
-      * short dropout (< min_hidden_s): keep previous side
-      * last seen in/at the A/B boundary zone or in B, or never seen yet: B_hidden
-      * last seen deeper in A: A_hidden (shadow / occlusion, NOT shelter)
+
+class StateMachine:
+    """A/B state of ONE chamber, frame by frame. A bug does not flip sides every second, so:
+
+    * evidence per frame: visible well inside A -> A, visible well outside -> B, visible within
+      `hyst_px` of the boundary -> no evidence. Not visible (after `min_hidden_s`): last seen near
+      the roof edge or in B -> B, last seen deeper in A (divider shadow) -> A.
+    * the side only changes after the opposite evidence has lasted `min_dwell_s`; the switch is
+      then dated back to when that evidence began (so latencies are not delayed).
+    * before the bug is first seen it is in the shelter (B hidden).
     """
-    r_ab = p.boundary()
-    min_f = max(1, int(round(p.min_hidden_s / dt)))
-    states = []
-    prev, last_r, run = STATE_B_HID, None, 0
-    for o in obs:
+
+    def __init__(self, dt, p):
+        self.p = p
+        self.r_ab = p.boundary()
+        self.min_f = max(1, int(round(p.min_hidden_s / dt)))
+        self.dwell_f = max(1, int(round(p.min_dwell_s / dt)))
+        self.side = None
+        self.sides, self.vis = [], []
+        self.last_r, self.run = None, 0
+        self.cand, self.cand_start = 0, 0
+
+    def _evidence(self, o):
+        p = self.p
         if o is not None:
-            run = 0
-            last_r = math.hypot(o[0] - p.cx, o[1] - p.cy)
-            st = STATE_A if last_r < r_ab else STATE_B
+            if self.last_r < self.r_ab - p.hyst_px:
+                return "A"
+            if self.last_r > self.r_ab + p.hyst_px:
+                return "B"
+            return None
+        if self.run < self.min_f:
+            return None
+        if self.side == "B" or self.last_r is None or self.last_r >= self.r_ab - p.entry_zone_px:
+            return "B"
+        return "A"
+
+    def update(self, o):
+        i = len(self.sides)
+        if o is not None:
+            self.run = 0
+            self.last_r = math.hypot(o[0] - self.p.cx, o[1] - self.p.cy)
+            if self.side is None:
+                self.side = "A" if self.last_r < self.r_ab else "B"
         else:
-            run += 1
-            if run < min_f:
-                st = STATE_A_HID if prev in IN_A else STATE_B_HID
-            elif prev in (STATE_B, STATE_B_HID) or last_r is None or last_r >= r_ab - p.entry_zone_px:
-                st = STATE_B_HID
-            else:
-                st = STATE_A_HID
-        states.append(st)
-        prev = st
-    return states
+            self.run += 1
+        if self.side is None:
+            self.sides.append("B")
+            self.vis.append(False)
+            return STATE_B_HID
+        ev = self._evidence(o)
+        if ev == self.side or (ev is None and o is not None):   # seen near the boundary: still in play
+            self.cand = 0
+        elif ev is not None:
+            if self.cand == 0:
+                self.cand_start = i
+            self.cand += 1
+            if self.cand >= self.dwell_f:
+                self.side = ev
+                for j in range(self.cand_start, i):
+                    self.sides[j] = ev
+                self.cand = 0
+        self.sides.append(self.side)
+        self.vis.append(o is not None)
+        return _label(self.side, o is not None)
+
+    def labels(self):
+        return [_label(s, v) for s, v in zip(self.sides, self.vis)]
+
+
+def classify(obs, dt, p):
+    """obs: per processed frame, (x, y) or None for ONE chamber -> list of states."""
+    m = StateMachine(dt, p)
+    for o in obs:
+        m.update(o)
+    return m.labels()
 
 
 def summarise(states, obs, dt, p):
@@ -312,6 +467,8 @@ class Cancelled(Exception):
 
 def run_analysis(video, p, out_dir, progress=None, cancel=None, log=print):
     os.makedirs(out_dir, exist_ok=True)
+    p = replace(p)                 # the bug area measured below must not leak into the caller's settings
+    cv2.setRNGSeed(12345)          # k-means blob splitting: same video -> same result
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise RuntimeError(f"cannot open {video}")
@@ -335,13 +492,21 @@ def run_analysis(video, p, out_dir, progress=None, cancel=None, log=print):
     spokes = find_spoke_angles(bg, p)
     sec = build_sector_map(bg.shape, p, spokes)
     roi = sec >= 0
+    cut = sector_cut(sec)
     log("divider angles: " + ", ".join(f"{a:.0f}" for a in spokes))
+    if not p.bug_area:
+        p.bug_area = None
+        est = estimate_bug_area(cap, f_start, f_end, bg, roi, cut, p)
+        p.bug_area = est
+        log(f"one bug = {est:.0f} px (blobs much bigger than this are split)" if est else
+            "could not measure the size of one bug; merged bugs will not be split")
     cv2.imwrite(os.path.join(out_dir, "calibration.png"), draw_overlay(bg, p, spokes, sec))
 
     n = p.n_sectors
     dt = p.step / fps
     obs = [[] for _ in range(n)]
-    last = [None] * n
+    trackers = [ChamberTracker(dt, p) for _ in range(n)]
+    machines = [StateMachine(dt, p) for _ in range(n)]
     times = []
     vw = None
     if p.save_video:
@@ -364,27 +529,30 @@ def run_analysis(video, p, out_dir, progress=None, cancel=None, log=print):
             if not ok:
                 break
             gray = _gray(frame)
-            dets = detect(gray, bg, roi, p)
+            dets = detect(gray, bg, roi, p, cut)
             by_sec = [[] for _ in range(n)]
             for d in dets:
                 k = int(sec[min(max(int(d[1]), 0), h - 1), min(max(int(d[0]), 0), w - 1)])
                 if k >= 0:
                     by_sec[k].append(d)
             for k in range(n):
-                d = pick_for_chamber(by_sec[k], last[k])
-                if d is None:
-                    obs[k].append(None)
-                else:
-                    obs[k].append((d[0], d[1]))
-                    last[k] = (d[0], d[1])
+                obs[k].append(trackers[k].update(by_sec[k]))
+                for j, pos in enumerate(reversed(trackers[k].backfill), start=2):
+                    obs[k][-j] = pos          # the frames that had to be confirmed first
             times.append((f - f_start) / fps)
             done += 1
+            if vw is None:
+                for k in range(n):
+                    machines[k].update(obs[k][-1])
             if vw is not None:
-                # cheap online state for the check video (final numbers use classify on the full sequence)
+                # online state for the check video; the final numbers use the same rules, but dated back
                 img = draw_overlay(frame, p, spokes, labels=False)
                 for k in range(n):
-                    live_states[k] = classify(obs[k][-int(60 / dt):], dt, p)[-1]
+                    live_states[k] = machines[k].update(obs[k][-1])
                     o = obs[k][-1]
+                    for d in by_sec[k]:   # grey dots: other blobs that were NOT chosen as the bug
+                        if o is None or math.hypot(d[0] - o[0], d[1] - o[1]) > 3:
+                            cv2.circle(img, (int(d[0]), int(d[1])), 5, (170, 170, 170), 1)
                     col = {STATE_A: (0, 220, 0), STATE_A_HID: (0, 160, 255),
                            STATE_B: (255, 120, 0), STATE_B_HID: (200, 0, 200)}[live_states[k]]
                     if o is not None:
